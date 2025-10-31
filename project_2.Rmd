@@ -1,0 +1,432 @@
+---
+title: "Project 2"
+author: "Miguel Ramirez"
+date: "2025-10-26"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r}
+library(haven)
+library(tidyverse)
+library(qqman)
+library(glmnet)
+library(ggplot2)
+library(MASS)
+library(dplyr)
+library(pls)
+```
+
+# Read SAS dataset
+
+```{r}
+maize = read_sas("./maize.sas7bdat", NULL)
+```
+
+# Cleaning the data
+```{r}
+set.seed(123)
+#check how many na values are in DtoA
+missing = sum(is.na(maize$DtoA))
+print(paste("Number of missing values in DtoA:", missing))
+
+set.seed(123)
+maize_cleaned = maize[complete.cases(maize), ]
+dim(maize_cleaned)
+```
+
+
+```{r}
+# Summary stats for DTOA
+summary(maize_cleaned$DtoA)
+
+#gg plot of the Dtoa distribution
+ggplot(maize, aes(x = DtoA)) +
+  geom_histogram(binwidth = 1, fill = "blue", color = "black", alpha = 0.7) +
+  labs(title = "Distribution of DtoA", x = "DtoA", y = "Frequency") +
+  theme_minimal()
+```
+
+
+
+```{r}
+# Define response and predictors
+y = maize_cleaned$DtoA
+x = data.matrix(maize_cleaned[, c(3:7391)])
+df = data.frame(cbind(y, x))
+
+# Standardize predictors  
+x = scale(x)  
+
+# Train/test split
+idx_train = sample(1:nrow(df), size = 0.7 * nrow(df))
+x_train = x[idx_train, ]
+y_train = y[idx_train]
+x_test  = x[-idx_train, ]
+y_test  = y[-idx_train]
+```
+
+
+### Ridge
+
+```{r}
+# Ridge regression with timing
+
+time_ridge = system.time({
+  ridge_cv = cv.glmnet(x_train, y_train, alpha = 0)
+})
+
+ridge_lambda_best = ridge_cv$lambda.min
+bestmodel_ridge = glmnet(x_train, y_train, alpha = 0, lambda = ridge_lambda_best)
+
+# Predictions
+train_pred = predict(bestmodel_ridge, s = ridge_lambda_best, newx = x_train)
+test_pred  = predict(bestmodel_ridge, s = ridge_lambda_best, newx = x_test)
+
+# Compute errors
+MSE_train = mean((y_train - train_pred)^2)
+MSE_test  = mean((y_test - test_pred)^2)
+
+# RMSE values
+RMSE_cv_ridge = sqrt(min(ridge_cv$cvm))
+RMSE_test_ridge = sqrt(MSE_test)
+
+# Summary table
+ridge_summary = data.frame(
+  Method = "Ridge Regression",
+  `RMSE (CV)` = round(RMSE_cv_ridge, 4),
+  `RMSE (Test)` = round(RMSE_test_ridge, 4),
+  `# Feats / Comps` = ncol(x_train),
+  `Time (s)` = round(time_ridge["elapsed"], 2)
+)
+
+print(ridge_summary)
+
+```
+
+#### graph Ridge
+```{r}
+# Convert cv.glmnet results to a df
+ridge_df = data.frame(
+  lambda = ridge_cv$lambda,
+  cvm = ridge_cv$cvm,
+  cvsd = ridge_cv$cvsd
+)
+
+ggplot(ridge_df, aes(x = log(lambda), y = sqrt(cvm))) +
+  geom_line(color = "darkblue", linewidth = 1) +
+  geom_ribbon(aes(ymin = sqrt(cvm - cvsd), ymax = sqrt(cvm + cvsd)),
+              alpha = 0.2, fill = "lightblue") +
+  geom_vline(xintercept = log(ridge_cv$lambda.min),
+             color = "red", linetype = "solid", linewidth = 1.1) +
+  geom_vline(xintercept = log(ridge_cv$lambda.1se),
+             color = "red", linetype = "dashed", linewidth = 1) +
+  labs(
+    title = "Ridge Regression Cross-Validation Curve",
+    x = expression(log(lambda)),
+    y = "RMSE (Cross-Validation)"
+  ) +
+  theme_minimal(base_size = 13)
+
+cat("Optimal lambda:", round(ridge_cv$lambda.min, 5), "\n")
+```
+
+### Lasso
+
+```{r}
+# Lasso with runtim
+time_lasso = system.time({
+  lasso_cv = cv.glmnet(x_train, y_train, alpha = 1)
+})
+
+# Optimal lambda
+lasso_lambda_best = lasso_cv$lambda.min
+
+# Fit best model using optimal lambda
+bestmodel_lasso = glmnet(x_train, y_train, alpha = 1, lambda = lasso_lambda_best)
+
+# Predictions on train and test sets
+train_pred_l = predict(bestmodel_lasso, s = lasso_lambda_best, newx = x_train)
+test_pred_l  = predict(bestmodel_lasso, s = lasso_lambda_best, newx = x_test)
+
+# Compute MSE and RMSE
+MSE_train_l = mean((y_train - train_pred_l)^2)
+MSE_test_l  = mean((y_test  - test_pred_l)^2)
+
+RMSE_cv_lasso   = sqrt(min(lasso_cv$cvm))
+RMSE_test_lasso = sqrt(MSE_test_l)
+
+# Extract non-zero coefficients 
+lasso_coefs = as.matrix(coef(bestmodel_lasso))
+SNP = rownames(lasso_coefs)[lasso_coefs != 0]
+coef_values = as.numeric(lasso_coefs[lasso_coefs != 0])
+
+# Drop intercept row
+var_select = data.frame(SNP, coef_values)[-1, ]
+var_select$coef_values = as.numeric(var_select$coef_values)
+
+# Count number of selected features
+num_features_lasso = nrow(var_select)
+
+cat("Best λ:", lasso_cv$lambda.min, "\n")
+
+# Build Lasso summary table
+lasso_summary = data.frame(
+  Method = "Lasso Regression",
+  `RMSE (CV)` = round(RMSE_cv_lasso, 4),
+  `RMSE (Test)` = round(RMSE_test_lasso, 4),
+  `# Feats / Comps` = num_features_lasso,
+  `Time (s)` = round(time_lasso["elapsed"], 2)
+)
+
+print(lasso_summary)
+
+```
+
+
+#### graph Lasso
+```{r}
+lasso_df = data.frame(
+  lambda = lasso_cv$lambda,
+  cvm = lasso_cv$cvm,
+  cvsd = lasso_cv$cvsd
+)
+
+ggplot(lasso_df, aes(x = log(lambda), y = sqrt(cvm))) +
+  geom_line(color = "darkblue", linewidth = 1) +
+  geom_ribbon(aes(ymin = sqrt(cvm - cvsd), ymax = sqrt(cvm + cvsd)),
+              alpha = 0.2, fill = "lightblue") +
+  geom_vline(xintercept = log(lasso_cv$lambda.min),
+             color = "red", linetype = "solid", linewidth = 1.1) +
+  geom_vline(xintercept = log(lasso_cv$lambda.1se),
+             color = "red", linetype = "dashed", linewidth = 1) +
+  labs(
+    title = "LASSO Regression Cross-Validation Curve",
+    x = expression(log(lambda)),
+    y = "RMSE (Cross-Validation)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+
+
+### Elastic 
+
+```{r}
+# Elastic Net regression
+
+time_elastic = system.time({
+  cv_elastic_model = cv.glmnet(x_train, y_train, alpha = 0.5)
+})
+
+# Extract optimal lambda
+elastic_lambda = cv_elastic_model$lambda.min
+
+# Fit model using the best lambda
+elastic_best = glmnet(x_train, y_train, alpha = 0.5, lambda = elastic_lambda)
+
+# Predictions and error metrics
+enet_train_pred = predict(elastic_best, s = elastic_lambda, newx = x_train)
+enet_test_pred  = predict(elastic_best, s = elastic_lambda, newx = x_test)
+
+MSE_train_enet = mean((y_train - enet_train_pred)^2)
+MSE_test_enet  = mean((y_test  - enet_test_pred)^2)
+
+# RMSE (cross-validation and test set)
+RMSE_cv_enet   = sqrt(min(cv_elastic_model$cvm))
+RMSE_test_enet = sqrt(MSE_test_enet)
+
+# Extract non-zero coefficients (selected SNPs)
+elastic_coefs = as.matrix(coef(elastic_best))
+SNP = rownames(elastic_coefs)[elastic_coefs != 0]
+coef_values = as.numeric(elastic_coefs[elastic_coefs != 0])
+
+# Drop intercept row
+elastic_select = data.frame(SNP, coef_values)[-1, ]
+elastic_select$coef_values = as.numeric(elastic_select$coef_values)
+
+num_features_elastic = nrow(elastic_select)
+
+elastic_summary = data.frame(
+  Method = "Elastic Net (α = 0.5)",
+  `RMSE (CV)` = round(RMSE_cv_enet, 4),
+  `RMSE (Test)` = round(RMSE_test_enet, 4),
+  `# Feats / Comps` = num_features_elastic,
+  `Time (s)` = round(time_elastic["elapsed"], 2)
+)
+
+print(elastic_summary)
+
+cat("best lambda elastic, alpha = 0.5:", round(cv_elastic_model$lambda.min, 5), "\n")
+```
+#### graph elastic 
+```{r}
+elastic_df = data.frame(
+  lambda = cv_elastic_model$lambda,
+  cvm = cv_elastic_model$cvm,
+  cvsd = cv_elastic_model$cvsd
+)
+
+ggplot(elastic_df, aes(x = log(lambda), y = sqrt(cvm))) +
+  geom_line(color = "darkblue", linewidth = 1) +
+  geom_ribbon(aes(ymin = sqrt(cvm - cvsd), ymax = sqrt(cvm + cvsd)),
+              alpha = 0.2, fill = "lightblue") +
+  geom_vline(xintercept = log(cv_elastic_model$lambda.min),
+             color = "red", linetype = "solid", linewidth = 1.1) +
+  geom_vline(xintercept = log(cv_elastic_model$lambda.1se),
+             color = "red", linetype = "dashed", linewidth = 1) +
+  labs(
+    title = "Elastic Net (α = 0.5) Cross-Validation Curve",
+    x = expression(log(lambda)),
+    y = "RMSE (Cross-Validation)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+
+### BIC 
+```{r}
+# Extract SNP marker columns only
+marker_data = dplyr::select(maize_cleaned, starts_with("m"))
+
+# Compute correlations between each SNP and DtoA
+cors = cor(marker_data, maize_cleaned$DtoA, use = "pairwise.complete.obs")
+
+# Select top 1500 SNPs by absolute correlation
+topK = 1500
+top_idx = order(abs(cors), decreasing = TRUE)[1:topK]
+top_vars = colnames(marker_data)[top_idx]
+
+# Reduced dataset: only DtoA + top SNPs
+df_reduced = maize_cleaned %>%
+  dplyr::select(DtoA, all_of(top_vars))
+
+# Define null and full models
+full_model = lm(DtoA ~ ., data = df_reduced)
+null_model = lm(DtoA ~ 1, data = df_reduced)
+
+time_bic = system.time({
+  step_bic = stepAIC(
+    null_model,
+    scope = list(lower = null_model, upper = full_model),
+    direction = "forward",
+    k = log(nrow(df_reduced)),
+    trace = FALSE
+  )
+})
+
+pred_bic = predict(step_bic, newdata = df_reduced)
+RMSE_bic = sqrt(mean((df_reduced$DtoA - pred_bic)^2))
+MAE_bic  = mean(abs(df_reduced$DtoA - pred_bic))
+num_predictors_bic = length(coef(step_bic)) - 1
+
+
+bic_summary = data.frame(
+  Method = "Stepwise BIC",
+  `RMSE (CV)` = NA, 
+  `RMSE (Test)` = round(RMSE_bic, 4),
+  `# Feats / Comps` = num_predictors_bic,
+  `Time (s)` = round(time_bic["elapsed"], 2)
+)
+
+print(bic_summary)
+
+```
+
+
+### PCR 
+```{r}
+# same train/test split from before
+df_all = data.frame(DtoA = y, as.data.frame(x))
+df_tr  = df_all[idx_train, ]
+df_te  = df_all[-idx_train, ]
+
+# PCR with cross-validation
+time_pcr = system.time({
+  pcr_fit = pls::pcr(DtoA ~ ., data = df_tr, scale = TRUE,
+                     ncomp = 50, validation = "CV")
+})
+
+# Determine optimal component counts
+msep_obj = pls::MSEP(pcr_fit)
+k_min = which.min(msep_obj$val[1, 1, -1])
+k_1se = pls::selectNcomp(pcr_fit, method = "onesigma", plot = FALSE)
+
+# Predictions using k_min
+pred_cv = fitted(pcr_fit)[, 1, k_min]      # CV predictions (training)
+pred_test = predict(pcr_fit, ncomp = k_min, newdata = df_te)
+
+# Compute metrics
+rmse = function(a,b) sqrt(mean((a - b)^2))
+
+RMSE_CV   = sqrt(mean((df_tr$DtoA - pred_cv)^2))
+RMSE_Test = rmse(df_te$DtoA, pred_test)
+
+# Build output table
+Method = "PCR (Principal Component Regression)"
+X_Feats_Comps = k_min   # number of components used
+Time_s = round(time_pcr["elapsed"], 0)
+
+summary_row = data.frame(
+  Method = Method,
+  RMSE..CV. = round(RMSE_CV, 4),
+  RMSE..Test. = round(RMSE_Test, 4),
+  X..Feats...Comps = X_Feats_Comps,
+  Time..s. = Time_s
+)
+
+print(summary_row, row.names = FALSE)
+```
+
+
+### PLS 
+
+```{r}
+# same split but as a df
+df_all = data.frame(DtoA = y, as.data.frame(x))
+df_tr  = df_all[idx_train, ]
+df_te  = df_all[-idx_train, ]
+
+#Fit PLS with cross-validation 
+time_pls = system.time({
+  pls_fit = pls::plsr(DtoA ~ ., data = df_tr, scale = FALSE, method = "simpls",
+                      ncomp = 50, validation = "CV")
+})
+
+#Choose optimal number of components 
+msep_obj = pls::MSEP(pls_fit)
+k_min = which.min(msep_obj$val[1, 1, -1])
+k_1se = pls::selectNcomp(pls_fit, method = "onesigma", plot = FALSE)
+
+
+#Predictions using k_min 
+pred_cv = fitted(pls_fit)[, 1, k_min]     
+pred_test = predict(pls_fit, ncomp = k_min, newdata = df_te)
+
+#Compute metrics 
+rmse = function(a,b) sqrt(mean((a - b)^2))
+
+RMSE_CV   = sqrt(mean((df_tr$DtoA - pred_cv)^2))
+RMSE_Test = rmse(df_te$DtoA, pred_test)
+
+#Build output table 
+Method = "PLS"
+X_Feats_Comps = k_min 
+Time_s = round(time_pls["elapsed"], 0)
+
+summary_row = data.frame(
+  Method = Method,
+  RMSE..CV. = round(RMSE_CV, 4),
+  RMSE..Test. = round(RMSE_Test, 4),
+  X..Feats...Comps = X_Feats_Comps,
+  Time..s. = Time_s
+)
+
+print(summary_row, row.names = FALSE)
+
+```
+
+
+
